@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::board::{ClockCompat, PhysicalStyle};
 use crate::error::{Error, Result};
-use crate::transport::Faults;
+use crate::transport::{Faults, TransportKind};
 
 /// Default socket path: `$XDG_RUNTIME_DIR/dgt-sim.sock`, else
 /// `/tmp/dgt-sim-<uid>.sock`.
@@ -46,6 +46,12 @@ pub enum Request {
     Info,
     /// All boards, one summary line each.
     List,
+    /// Create one more board at runtime, returning its summary.
+    Create {
+        /// Transport for the new board; defaults to the daemon's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transport: Option<TransportKind>,
+    },
     /// One board's details.
     Show { board: u32 },
     /// Recent outbound protocol messages, as hex.

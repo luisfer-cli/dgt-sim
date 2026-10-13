@@ -73,6 +73,7 @@ Use `--json` on any query for machine-readable output and rely on the exit codes
 | Command | Purpose |
 | --- | --- |
 | `start --boards N [--transport pty\|tcp]` | Run the daemon and create boards |
+| `add [--transport pty\|tcp]` | Create one more board in the running daemon |
 | `info` | Daemon status: pid, socket, board count, uptime |
 | `list` | One line per board with its endpoint |
 | `show --board N` (alias `status`) | Full board state, clock and FEN |

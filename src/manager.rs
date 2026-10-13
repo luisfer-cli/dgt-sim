@@ -118,7 +118,7 @@ impl Manager {
 
         let mut created = Vec::with_capacity(self.opts.boards as usize);
         for _ in 0..self.opts.boards {
-            match self.create_board().await {
+            match self.create_board(self.opts.transport).await {
                 Ok(id) => created.push(BoardSummary {
                     id,
                     transport: self.opts.transport.name().to_string(),
@@ -176,7 +176,7 @@ impl Manager {
         Ok(())
     }
 
-    async fn create_board(&mut self) -> Result<u32> {
+    async fn create_board(&mut self, transport: TransportKind) -> Result<u32> {
         if self.boards.len() as u32 >= MAX_BOARDS {
             return Err(Error::Limit(format!("cannot exceed {MAX_BOARDS} boards")));
         }
@@ -184,7 +184,7 @@ impl Manager {
         self.next_id += 1;
 
         let (link_tx, link_rx) = mpsc::channel::<Link>(8);
-        let (endpoint, kind, accepting) = match self.opts.transport {
+        let (endpoint, kind, accepting) = match transport {
             TransportKind::Pty => {
                 let link = PtyLink::open()
                     .map_err(|err| Error::Transport(format!("openpty failed: {err}")))?;
@@ -269,6 +269,20 @@ impl Manager {
                     });
                 }
                 Ok(Some(serde_json::to_value(rows)?))
+            }
+            Request::Create { transport } => {
+                let transport = transport.unwrap_or(self.opts.transport);
+                let id = self.create_board(transport).await?;
+                let snapshot = self.snapshot(id).await?;
+                Ok(Some(serde_json::to_value(BoardSummary {
+                    id: snapshot.id,
+                    transport: snapshot.transport,
+                    endpoint: snapshot.endpoint,
+                    connected: snapshot.connected,
+                    mode: snapshot.mode,
+                    fen: snapshot.fen,
+                    messages_sent: snapshot.messages_sent,
+                })?))
             }
             Request::Show { board } => Ok(Some(serde_json::to_value(self.snapshot(board).await?)?)),
             Request::Messages { board } => Ok(Some(self.board_messages(board).await?)),

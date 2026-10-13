@@ -17,6 +17,16 @@ dgt-sim start --boards 100 --transport tcp
 dgt-sim start --boards 4 --json | jq -r '.[].endpoint'
 ```
 
+A running daemon can grow: `add` creates one more board on demand, using the
+daemon's transport unless `--transport` overrides it. This is how a GUI opens a
+board per instance without restarting the simulator.
+
+```bash
+dgt-sim add                       # one more board, same transport as the daemon
+dgt-sim add --transport tcp       # one more board, explicitly over TCP
+dgt-sim add --json | jq -r .endpoint
+```
+
 `start` runs in the foreground. Use a second shell (or a service unit) for the
 commands below. A different control socket can be chosen with `--socket PATH` or
 `$DGT_SIM_SOCKET`.

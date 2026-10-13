@@ -78,6 +78,14 @@ pub struct OutputArgs {
 pub enum Command {
     /// Start the simulator in the foreground and create virtual boards.
     Start(StartArgs),
+    /// Create one more virtual board in the running simulator.
+    Add {
+        /// Transport for the new board; defaults to the daemon's.
+        #[arg(long, value_enum)]
+        transport: Option<TransportArg>,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
     /// Daemon status: socket, pid, board count.
     Info(OutputArgs),
     /// List every virtual board with its endpoint.
@@ -458,6 +466,12 @@ pub async fn run(cli: Cli) -> Result<i32> {
 fn to_request(command: Command) -> Result<(Request, OutputArgs)> {
     let pair = match command {
         Command::Start(_) => unreachable!("start is handled before this point"),
+        Command::Add { transport, out } => (
+            Request::Create {
+                transport: transport.map(Into::into),
+            },
+            out,
+        ),
         Command::Info(out) => (Request::Info, out),
         Command::List(out) => (Request::List, out),
         Command::Show(args) => (Request::Show { board: args.board }, args.out),
@@ -645,6 +659,14 @@ fn render(request: &Request, data: &Value) -> Result<()> {
                     row.fen
                 );
             }
+        }
+        Request::Create { .. } => {
+            println!(
+                "board {} created ({}) endpoint={}",
+                stringify_field(data, "id"),
+                stringify_field(data, "transport"),
+                stringify_field(data, "endpoint")
+            );
         }
         Request::Show { .. } => {
             let fields: [(&str, &str); 16] = [
