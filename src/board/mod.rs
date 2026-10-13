@@ -272,6 +272,12 @@ impl BoardTask {
     ) {
         let mut link: Option<Link> = None;
         let mut buf = vec![0u8; 8192];
+        // A transport may close its link channel once it will never hand out
+        // another link (PTY sends exactly one and drops the sender). `recv()`
+        // then returns `None` forever, so the branch must be switched off: a
+        // `select!` arm that is always ready with nothing to do would spin the
+        // task at 100% CPU and starve the ticker.
+        let mut link_rx_open = true;
         // 200 ms matches the real board's full-scan period and is comfortably
         // inside the "at least every second" clock requirement.
         let mut ticker = tokio::time::interval(Duration::from_millis(200));
@@ -324,9 +330,9 @@ impl BoardTask {
                         }
                     }
                 }
-                incoming = link_rx.recv() => {
+                incoming = link_rx.recv(), if link_rx_open => {
                     match incoming {
-                        None => {}
+                        None => link_rx_open = false,
                         Some(new_link) => {
                             if !self.enabled {
                                 tracing::debug!(board = self.id, "link refused: board is disconnected");

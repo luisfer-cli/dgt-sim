@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use dgt_sim::board::PhysicalStyle;
-use dgt_sim::control::Request;
+use dgt_sim::control::{ClockRequestJson, Request};
 use dgt_sim::manager::{RunningSimulator, StartOptions};
 use dgt_sim::protocol::messages::{self, Framer};
 use dgt_sim::transport::{TransportKind, pty::PtyLink};
@@ -315,6 +315,41 @@ async fn stopping_boards_frees_their_pty() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(closed, "{endpoint} still exists after stop");
+
+    sim.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pty_board_keeps_ticking_without_a_client() {
+    // The PTY transport hands the board one link and then drops the sender, so
+    // its link channel closes. A closed channel used to make the board's
+    // `select!` spin at 100% CPU (the `recv()` arm was always ready with
+    // nothing to do) and starve the 200 ms ticker. The clock is the observable
+    // proof that ticks still happen with no client attached.
+    let sim = RunningSimulator::start(options(1, TransportKind::Pty), "/tmp/dgt-sim-pty-tick.sock")
+        .await
+        .unwrap();
+
+    sim.expect(Request::Clock {
+        board: 1,
+        clock: ClockRequestJson {
+            left_ms: Some(300_000),
+            running: Some(true),
+            connected: Some(true),
+            ..Default::default()
+        },
+    })
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let snapshot = sim.snapshot(1).await.unwrap();
+    let left_ms = snapshot["clock"]["left_ms"].as_u64().unwrap();
+    assert!(
+        left_ms < 299_500,
+        "the clock did not advance ({left_ms} ms): the board's ticker is starved"
+    );
 
     sim.shutdown().await.unwrap();
 }
