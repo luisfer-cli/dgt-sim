@@ -99,6 +99,19 @@ Run `dgt-sim --help` or `dgt-sim <command> --help` for the full list of flags.
 - [`docs/compatibility.md`](docs/compatibility.md) — what "compatible" means here, and what it does not.
 - [`docs/examples.md`](docs/examples.md) — copy-pasteable recipes.
 
+## Run as a service
+
+A systemd user unit is provided in [`packaging/systemd/`](packaging/systemd/);
+see [`packaging/systemd/README.md`](packaging/systemd/README.md) for install
+instructions and a system-wide variant.
+
+```bash
+install -Dm755 target/release/dgt-sim ~/.local/bin/dgt-sim
+mkdir -p ~/.config/systemd/user
+cp packaging/systemd/dgt-sim.service ~/.config/systemd/user/
+systemctl --user enable --now dgt-sim.service
+```
+
 ## Testing
 
 ```bash

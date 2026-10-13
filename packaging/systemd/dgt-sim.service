@@ -1,0 +1,41 @@
+[Unit]
+Description=DGT electronic chess board emulator (dgt-sim)
+Documentation=https://github.com/luisfer-cli/dgt-sim
+Documentation=man:systemd.service(5)
+# The daemon is fully self-contained: it only needs the filesystem, PTYs and
+# its control socket, all of which are available after the user manager is up.
+After=default.target
+
+[Service]
+Type=simple
+# Adjust the path if the binary lives elsewhere (e.g. %h/.cargo/bin/dgt-sim).
+ExecStart=%h/.local/bin/dgt-sim start --boards ${DGT_SIM_BOARDS} --transport ${DGT_SIM_TRANSPORT}
+# Board count and transport are configurable through environment variables so
+# that they can be changed with a drop-in instead of editing this file:
+#   systemctl --user edit dgt-sim.service   ->   [Service]
+#                                                Environment=DGT_SIM_BOARDS=100
+Environment=DGT_SIM_BOARDS=10
+Environment=DGT_SIM_TRANSPORT=pty
+# `start` prints one endpoint per board on stdout; the journal keeps them.
+StandardOutput=journal
+StandardError=journal
+# dgt-sim turns SIGTERM into a graceful shutdown: every board is stopped, PTYs
+# and the control socket are released.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+Restart=on-failure
+RestartSec=2
+
+# Hardening. These are safe for an ordinary user service; drop any that your
+# kernel or setup rejects (e.g. ProtectSystem needs unprivileged user
+# namespaces).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# ProtectSystem=strict makes everything read-only, so the control socket in
+# $XDG_RUNTIME_DIR (= %t for a user manager) needs an explicit writable path.
+ReadWritePaths=%t
+
+[Install]
+WantedBy=default.target
