@@ -1,0 +1,46 @@
+[package]
+name = "dgt-sim"
+version = "0.1.0"
+edition = "2024"
+description = "Emulator of DGT electronic chess boards (binary DGT serial protocol)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/luisfer-cli/dgt-sim"
+rust-version = "1.85"
+
+[lib]
+name = "dgt_sim"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dgt-sim"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.47", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "sync",
+    "signal",
+    "time",
+    "fs",
+    "process",
+] }
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+nix = { version = "0.30", features = ["term", "fs", "user", "signal", "process"] }
+shakmaty = "0.28"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+panic = "abort"
+
+[[bench]]
+name = "boards"
+harness = false
