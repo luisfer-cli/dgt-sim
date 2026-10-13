@@ -79,7 +79,6 @@ pub struct Manager {
     opts: StartOptions,
     socket: PathBuf,
     boards: BTreeMap<u32, BoardHandle>,
-    next_id: u32,
     started: Instant,
     replays: JoinSet<()>,
 }
@@ -90,7 +89,6 @@ impl Manager {
             opts,
             socket,
             boards: BTreeMap::new(),
-            next_id: 1,
             started: Instant::now(),
             replays: JoinSet::new(),
         }
@@ -180,8 +178,9 @@ impl Manager {
         if self.boards.len() as u32 >= MAX_BOARDS {
             return Err(Error::Limit(format!("cannot exceed {MAX_BOARDS} boards")));
         }
-        let id = self.next_id;
-        self.next_id += 1;
+        // Reuse the lowest free id: stopping a board frees its id, so the next
+        // one takes that slot instead of a fresh, ever growing number.
+        let id = lowest_free_id(self.boards.keys().copied());
 
         let (link_tx, link_rx) = mpsc::channel::<Link>(8);
         let (endpoint, kind, accepting) = match transport {
@@ -469,6 +468,22 @@ impl Manager {
     }
 }
 
+/// The lowest board id not currently in use.
+///
+/// `used` must be sorted ascending, which a `BTreeMap`'s keys already are.
+fn lowest_free_id(used: impl IntoIterator<Item = u32>) -> u32 {
+    let mut id = 1;
+    for used_id in used {
+        if used_id > id {
+            break;
+        }
+        if used_id == id {
+            id += 1;
+        }
+    }
+    id
+}
+
 fn parse_mode(mode: &str) -> Result<Mode> {
     match mode.to_ascii_lowercase().replace('-', "_").as_str() {
         "idle" => Ok(Mode::Idle),
@@ -632,6 +647,16 @@ impl RunningSimulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn free_ids_are_reused_from_the_lowest_gap() {
+        assert_eq!(lowest_free_id([]), 1);
+        assert_eq!(lowest_free_id([1, 2, 3]), 4);
+        assert_eq!(lowest_free_id([2, 3]), 1);
+        assert_eq!(lowest_free_id([1, 3, 4]), 2);
+        assert_eq!(lowest_free_id([1, 2, 4, 5]), 3);
+        assert_eq!(lowest_free_id([3]), 1);
+    }
 
     #[test]
     fn mode_parsing_accepts_scripts_friendly_spellings() {

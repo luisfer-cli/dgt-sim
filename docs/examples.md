@@ -21,6 +21,10 @@ A running daemon can grow: `add` creates one more board on demand, using the
 daemon's transport unless `--transport` overrides it. This is how a GUI opens a
 board per instance without restarting the simulator.
 
+Board ids are reused: `add` takes the lowest free id, so stopping a board frees
+its slot for the next one instead of leaving an ever growing gap in the
+numbering.
+
 ```bash
 dgt-sim add                       # one more board, same transport as the daemon
 dgt-sim add --transport tcp       # one more board, explicitly over TCP
