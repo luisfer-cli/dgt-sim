@@ -46,16 +46,15 @@ impl Client {
     /// Read until `count` complete messages have been seen, or time out.
     async fn expect_frames(&mut self, count: usize, timeout: Duration) -> Vec<messages::Frame> {
         let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            while let Some(frame) = self.framer.next_frame() {
-                return vec![frame];
+        let mut out = Vec::with_capacity(count);
+        while out.len() < count {
+            if let Some(frame) = self.framer.next_frame() {
+                out.push(frame);
+                continue;
             }
             let left = deadline.saturating_duration_since(tokio::time::Instant::now());
             if left.is_zero() {
-                panic!(
-                    "timed out after seeing {} of {count} frames",
-                    self.framer.skipped_bytes()
-                );
+                panic!("timed out after seeing {} of {count} frames", out.len());
             }
             let n = tokio::time::timeout(left, self.stream.read(&mut self.buf))
                 .await
@@ -64,15 +63,12 @@ impl Client {
             assert!(n > 0, "the board closed the connection early");
             self.framer.push(&self.buf[..n]);
         }
+        out
     }
 
     /// Collect exactly `count` frames.
     async fn frames(&mut self, count: usize) -> Vec<messages::Frame> {
-        let mut out = Vec::with_capacity(count);
-        while out.len() < count {
-            out.extend(self.expect_frames(count, Duration::from_secs(5)).await);
-        }
-        out
+        self.expect_frames(count, Duration::from_secs(5)).await
     }
 
     /// Assert that nothing arrives within `window`.
@@ -103,6 +99,21 @@ async fn simulator(boards: u32, faults: Faults) -> RunningSimulator {
 
 fn endpoint(sim: &RunningSimulator, board: u32) -> String {
     sim.endpoint(board).expect("board exists").to_string()
+}
+
+/// Wait until the board leaves IDLE mode, i.e. the client's mode command has
+/// been processed. Bytes written by the client and commands injected through
+/// the control plane travel over different channels, so a test that needs them
+/// ordered must synchronise on the observed state rather than on a sleep.
+async fn wait_for_streaming(sim: &RunningSimulator, board: u32) {
+    for _ in 0..200 {
+        let snapshot = sim.snapshot(board).await.expect("snapshot");
+        if snapshot["mode"] != "idle" {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("board {board} never left idle mode");
 }
 
 #[tokio::test]
@@ -194,6 +205,7 @@ async fn update_board_mode_streams_lift_then_place() {
 
     // Enter UPDATE_BOARD, then move again.
     client.send(&[0x44]).await;
+    wait_for_streaming(&sim, 1).await;
     let snapshot: Snapshot = serde_json::from_value(
         sim.expect(Request::Move {
             board: 1,
@@ -221,7 +233,9 @@ async fn update_mode_sends_clock_messages_and_update_board_does_not() {
     sim.expect(Request::Clock {
         board: 1,
         clock: dgt_sim::control::ClockRequestJson {
-            left_ms: Some(60_000),
+            // 1:30:45 on the left so a 200 ms tick cannot cross a minute
+            // boundary while the test is running.
+            left_ms: Some(5_445_000),
             right_ms: Some(90_000),
             running: Some(true),
             ..Default::default()
@@ -238,8 +252,9 @@ async fn update_mode_sends_clock_messages_and_update_board_does_not() {
     let frames = client.frames(2).await;
     assert_eq!(frames[0].id, messages::id::BWTIME);
     assert!(!messages::is_clock_ack(&frames[0].payload));
-    // payload[3] is left minutes BCD, payload[6] the status byte.
-    assert_eq!(frames[0].payload[3] & 0x0f, 1, "left minutes");
+    // payload[3] is left hours, payload[4] left minutes BCD, payload[6] status.
+    assert_eq!(frames[0].payload[3] & 0x0f, 1, "left hours");
+    assert_eq!(frames[0].payload[4], 0x30, "left minutes BCD");
     assert_ne!(frames[0].payload[6] & messages::bwtime_status::RUNNING, 0);
 
     sim.shutdown().await.unwrap();
@@ -289,8 +304,15 @@ async fn set_n_run_clock_command_sets_both_screens() {
     client.frames(2).await; // initial clock message + set-n-run ack
 
     let snapshot = sim.snapshot(1).await.unwrap();
-    assert_eq!(snapshot["clock"]["left"], "0:10:30");
-    assert_eq!(snapshot["clock"]["right"], "1:00:15");
+    // The clock is running, so a 200 ms tick may shave one second off between
+    // programming it and reading it back.
+    let left = snapshot["clock"]["left"].as_str().unwrap();
+    assert!(left == "0:10:30" || left == "0:10:29", "left clock {left}");
+    let right = snapshot["clock"]["right"].as_str().unwrap();
+    assert!(
+        right == "1:00:15" || right == "1:00:14",
+        "right clock {right}"
+    );
     assert_eq!(snapshot["clock"]["running"], true);
 
     sim.shutdown().await.unwrap();
@@ -363,16 +385,27 @@ async fn eeprom_dump_has_the_size_of_a_real_board() {
         messages::ee::DOWNLOADED
     );
     assert_eq!(*frames[0].payload.last().unwrap(), messages::ee::EOF);
-    // The two field updates for e2 -> e4 are in the tail, before EE_EOF.
+    // The two field updates for e2 -> e4 are in the tail, before EE_EOF. The
+    // hysteresis bit D4 ("less than 250 ms since the previous tag") may be set
+    // on the second one, so match the code bits only.
     let tail = &frames[0].payload[frames[0].payload.len() - 8..];
-    assert!(tail.contains(&ee_tag(code::EMPTY)), "e2 lift recorded");
-    assert!(tail.contains(&ee_tag(code::WPAWN)), "e4 place recorded");
+    assert!(
+        tail.iter().any(|b| ee_tag_matches(*b, code::EMPTY)),
+        "e2 lift recorded: {tail:?}"
+    );
+    assert!(
+        tail.iter().any(|b| ee_tag_matches(*b, code::WPAWN)),
+        "e4 place recorded: {tail:?}"
+    );
 
     sim.shutdown().await.unwrap();
 }
 
-fn ee_tag(piece_code: u8) -> u8 {
-    0x40 | piece_code
+/// Does `byte` carry a field-update EEPROM tag for `piece_code`, ignoring the
+/// D4 hysteresis bit? Field tags are `0t0r nnnn`; clock and position tags set
+/// bit D5, so they never match.
+fn ee_tag_matches(byte: u8, piece_code: u8) -> bool {
+    byte & 0x60 == 0x40 && byte & 0x0f == piece_code
 }
 
 #[tokio::test]
@@ -380,6 +413,7 @@ async fn captures_replays_and_castling_produce_correct_field_sequences() {
     let sim = simulator(1, Faults::default()).await;
     let mut client = Client::connect(&endpoint(&sim, 1)).await;
     client.send(&[0x44]).await;
+    wait_for_streaming(&sim, 1).await;
 
     // Castling: king first, then the rook, as a real board reports it.
     sim.expect(Request::SetFen {
@@ -420,6 +454,7 @@ async fn pgn_replay_emits_the_whole_game() {
     let sim = simulator(1, Faults::default()).await;
     let mut client = Client::connect(&endpoint(&sim, 1)).await;
     client.send(&[0x44]).await;
+    wait_for_streaming(&sim, 1).await;
 
     sim.expect(Request::Replay {
         board: 1,
@@ -432,8 +467,8 @@ async fn pgn_replay_emits_the_whole_game() {
     .await
     .unwrap();
 
-    // Seven quiet moves (2 messages each) plus a castle (4 messages).
-    let frames = client.frames(7 * 2 + 4).await;
+    // Six quiet moves (2 messages each) plus a castle (4 messages).
+    let frames = client.frames(6 * 2 + 4).await;
     assert!(frames.iter().all(|f| f.id == messages::id::FIELD_UPDATE));
 
     // Give the replay task a moment to finish before snapshotting.
@@ -457,6 +492,7 @@ async fn move_orders_are_not_reordered_by_the_scheduler() {
     for board in 1..=5 {
         let mut client = Client::connect(&endpoint(&sim, board)).await;
         client.send(&[0x44]).await;
+        wait_for_streaming(&sim, board).await;
         clients.push(client);
     }
     let moves = ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5"];
@@ -474,7 +510,7 @@ async fn move_orders_are_not_reordered_by_the_scheduler() {
         let frames = client.frames(10).await;
         let squares: Vec<u8> = frames.iter().map(|f| f.payload[0]).collect();
         // e2/e4, e7/e5, g1/f3, b8/c6, f1/b5 -> field numbers in order.
-        assert_eq!(squares, vec![52, 36, 12, 28, 62, 46, 57, 42, 61, 33]);
+        assert_eq!(squares, vec![52, 36, 12, 28, 62, 45, 1, 18, 61, 25]);
     }
 
     sim.shutdown().await.unwrap();
@@ -598,6 +634,7 @@ async fn set_fen_and_reset_emit_a_field_update_per_changed_field() {
     let sim = simulator(1, Faults::default()).await;
     let mut client = Client::connect(&endpoint(&sim, 1)).await;
     client.send(&[0x44]).await;
+    wait_for_streaming(&sim, 1).await;
 
     // An empty board: 32 pieces disappear.
     let snapshot = sim
@@ -661,6 +698,7 @@ async fn magic_pieces_are_reportable_through_the_protocol() {
     let sim = simulator(1, Faults::default()).await;
     let mut client = Client::connect(&endpoint(&sim, 1)).await;
     client.send(&[0x44]).await;
+    wait_for_streaming(&sim, 1).await;
 
     for (square, piece) in [
         ("e4", "magic-draw"),
@@ -681,9 +719,11 @@ async fn magic_pieces_are_reportable_through_the_protocol() {
     assert_eq!(frames[2].payload, vec![35, code::MAGIC_BLACK_WIN]);
 
     let snapshot = sim.snapshot(1).await.unwrap();
+    // `magic` is reported in field order (a8 first), not insertion order:
+    // e5 = field 28, d4 = 35, e4 = 36.
     assert_eq!(
         snapshot["magic"],
-        json!(["e4:magic-draw", "e5:magic-white-win", "d4:magic-black-win"])
+        json!(["e5:magic-white-win", "d4:magic-black-win", "e4:magic-draw"])
     );
 
     sim.shutdown().await.unwrap();
@@ -691,11 +731,12 @@ async fn magic_pieces_are_reportable_through_the_protocol() {
 
 #[tokio::test]
 async fn command_parser_and_framer_agree_on_a_real_capture() {
-    // The first messages of arnholt/dgtdriver's 1.inbytes capture, decoded from
-    // the base64-encoded hexdumps in that repository.
-    let capture: &[u8] = &[
-        // DGT_MSG_BOARD_DUMP of the starting position.
-        hex_bytes("8600 4308 090a 0c0b 0a09 0807"),
+    // A real board dump of the starting position, followed by the messages that
+    // come after it in arnholt/dgtdriver's 1.inbytes capture (decoded from the
+    // base64-encoded hexdumps in that repository).
+    let board_dump = messages::board_dump(&pieces::START_SQUARES);
+    let capture: Vec<u8> = [
+        board_dump.clone(),
         // DGT_MSG_BWTIME: 0:03:02 both sides, time-per-move on, right to move.
         hex_bytes("8d00 0a20 0302 2003 0208"),
         // DGT_MSG_FIELD_UPDATE: field 0x34 (e2) became empty.
@@ -705,18 +746,27 @@ async fn command_parser_and_framer_agree_on_a_real_capture() {
     ]
     .concat();
 
-    let mut framer = Framer::new();
-    framer.push(&capture);
-    let mut decoded = Vec::new();
-    while let Some(frame) = framer.next_frame() {
-        decoded.push(frame);
-    }
-    // The board dump is truncated on purpose (only 7 of 64 payload bytes), so
-    // the framer must not emit it yet.
-    let (frames, _) = decode_stream(&capture);
-    assert_eq!(frames.len(), 1);
-    assert_eq!(frames[0].id, messages::id::BWTIME);
-    assert!(!messages::is_clock_ack(&frames[0].payload));
+    let (frames, skipped) = decode_stream(&capture);
+    assert_eq!(skipped, 0, "the capture is well formed");
+    let ids: Vec<u8> = frames.iter().map(|f| f.id).collect();
+    assert_eq!(
+        ids,
+        vec![
+            messages::id::BOARD_DUMP,
+            messages::id::BWTIME,
+            messages::id::FIELD_UPDATE,
+            messages::id::FIELD_UPDATE,
+        ]
+    );
+    assert_eq!(frames[0].payload.len(), 64);
+    assert!(!messages::is_clock_ack(&frames[1].payload));
+    assert_eq!(frames[2].payload, vec![0x34, 0x00]);
+    assert_eq!(frames[3].payload, vec![0x24, 0x01]);
+
+    // A dump truncated mid-payload must not be emitted: the framer has a header
+    // claiming 67 bytes and must wait for the rest rather than guess a boundary.
+    let (partial, _) = decode_stream(&board_dump[..20]);
+    assert!(partial.is_empty(), "an incomplete dump must not be emitted");
 
     let mut parser = dgt_sim::protocol::CommandParser::new();
     parser.push(&[0x42, 0x44, 0x40]);

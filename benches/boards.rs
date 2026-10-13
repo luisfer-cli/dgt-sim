@@ -86,7 +86,10 @@ async fn bench_tcp(n: u32) -> (Duration, Duration) {
                 assert_eq!(frame.payload.len(), 64);
                 break;
             }
-            assert!(Instant::now() < deadline, "timed out waiting for a board dump");
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for a board dump"
+            );
         }
     }
     let per_board = query_at.elapsed();

@@ -384,7 +384,7 @@ impl Manager {
         speed: f64,
         repeat: bool,
     ) -> Result<()> {
-        if !(speed > 0.0) || !speed.is_finite() {
+        if speed <= 0.0 || !speed.is_finite() {
             return Err(Error::Other(format!(
                 "--speed must be a positive number, got {speed}"
             )));
@@ -527,111 +527,6 @@ fn build_clock_request(clock: &crate::control::ClockRequestJson) -> Result<Clock
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mode_parsing_accepts_scripts_friendly_spellings() {
-        assert_eq!(parse_mode("idle").unwrap(), Mode::Idle);
-        assert_eq!(parse_mode("update-board").unwrap(), Mode::UpdateBoard);
-        assert_eq!(parse_mode("UPDATE_BOARD").unwrap(), Mode::UpdateBoard);
-        assert_eq!(parse_mode("nice").unwrap(), Mode::UpdateNice);
-        assert!(parse_mode("turbo").is_err());
-    }
-
-    #[test]
-    fn config_patch_is_validated() {
-        assert!(
-            build_config_patch(&ConfigRequest::default())
-                .unwrap()
-                .serial
-                .is_none()
-        );
-
-        let ok = ConfigRequest {
-            serial: Some("00123".into()),
-            version: Some("1.8".into()),
-            ..Default::default()
-        };
-        let patch = build_config_patch(&ok).unwrap();
-        assert_eq!(patch.serial.as_deref(), Some("00123"));
-        assert_eq!(patch.version, Some((1, 8)));
-
-        for bad in [
-            ConfigRequest {
-                serial: Some("123456".into()),
-                ..Default::default()
-            },
-            ConfigRequest {
-                serial: Some("abc".into()),
-                ..Default::default()
-            },
-            ConfigRequest {
-                long_serial: Some("12345678901".into()),
-                ..Default::default()
-            },
-            ConfigRequest {
-                version: Some("x.y".into()),
-                ..Default::default()
-            },
-            ConfigRequest {
-                trademark: Some("\u{ff}".repeat(4).into()),
-                ..Default::default()
-            },
-        ] {
-            assert!(
-                build_config_patch(&bad).is_err(),
-                "{bad:?} should be rejected"
-            );
-        }
-    }
-
-    #[test]
-    fn clock_request_rejects_unknown_sides() {
-        assert!(
-            build_clock_request(&crate::control::ClockRequestJson::default())
-                .unwrap()
-                .turn
-                .is_none()
-        );
-        let req = crate::control::ClockRequestJson {
-            turn: Some("left".into()),
-            left_ms: Some(1000),
-            running: Some(true),
-            ..Default::default()
-        };
-        let built = build_clock_request(&req).unwrap();
-        assert_eq!(built.turn, Some(Side::Left));
-        assert_eq!(built.left, Some(Duration::from_millis(1000)));
-        assert_eq!(built.running, Some(true));
-
-        let bad = crate::control::ClockRequestJson {
-            turn: Some("up".into()),
-            ..Default::default()
-        };
-        assert!(build_clock_request(&bad).is_err());
-    }
-
-    #[test]
-    fn board_ceiling_is_enforced() {
-        let opts = StartOptions {
-            boards: MAX_BOARDS + 1,
-            ..StartOptions::default()
-        };
-        let manager = Manager::new(opts, PathBuf::from("/tmp/never.sock"));
-        let (_tx, rx) = mpsc::channel(1);
-        let (ready_tx, _ready_rx) = oneshot::channel();
-        let err = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(manager.run(rx, ready_tx))
-            .unwrap_err();
-        assert!(matches!(err, Error::Limit(_)), "got {err:?}");
-    }
-}
-
 /// An embedded simulator: the manager plus its request channel, without the
 /// control socket.
 ///
@@ -717,5 +612,110 @@ impl RunningSimulator {
         self.join
             .await
             .map_err(|err| Error::Other(format!("the simulator task panicked: {err}")))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mode_parsing_accepts_scripts_friendly_spellings() {
+        assert_eq!(parse_mode("idle").unwrap(), Mode::Idle);
+        assert_eq!(parse_mode("update-board").unwrap(), Mode::UpdateBoard);
+        assert_eq!(parse_mode("UPDATE_BOARD").unwrap(), Mode::UpdateBoard);
+        assert_eq!(parse_mode("nice").unwrap(), Mode::UpdateNice);
+        assert!(parse_mode("turbo").is_err());
+    }
+
+    #[test]
+    fn config_patch_is_validated() {
+        assert!(
+            build_config_patch(&ConfigRequest::default())
+                .unwrap()
+                .serial
+                .is_none()
+        );
+
+        let ok = ConfigRequest {
+            serial: Some("00123".into()),
+            version: Some("1.8".into()),
+            ..Default::default()
+        };
+        let patch = build_config_patch(&ok).unwrap();
+        assert_eq!(patch.serial.as_deref(), Some("00123"));
+        assert_eq!(patch.version, Some((1, 8)));
+
+        for bad in [
+            ConfigRequest {
+                serial: Some("123456".into()),
+                ..Default::default()
+            },
+            ConfigRequest {
+                serial: Some("abc".into()),
+                ..Default::default()
+            },
+            ConfigRequest {
+                long_serial: Some("12345678901".into()),
+                ..Default::default()
+            },
+            ConfigRequest {
+                version: Some("x.y".into()),
+                ..Default::default()
+            },
+            ConfigRequest {
+                trademark: Some("\u{ff}".repeat(4)),
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                build_config_patch(&bad).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn clock_request_rejects_unknown_sides() {
+        assert!(
+            build_clock_request(&crate::control::ClockRequestJson::default())
+                .unwrap()
+                .turn
+                .is_none()
+        );
+        let req = crate::control::ClockRequestJson {
+            turn: Some("left".into()),
+            left_ms: Some(1000),
+            running: Some(true),
+            ..Default::default()
+        };
+        let built = build_clock_request(&req).unwrap();
+        assert_eq!(built.turn, Some(Side::Left));
+        assert_eq!(built.left, Some(Duration::from_millis(1000)));
+        assert_eq!(built.running, Some(true));
+
+        let bad = crate::control::ClockRequestJson {
+            turn: Some("up".into()),
+            ..Default::default()
+        };
+        assert!(build_clock_request(&bad).is_err());
+    }
+
+    #[test]
+    fn board_ceiling_is_enforced() {
+        let opts = StartOptions {
+            boards: MAX_BOARDS + 1,
+            ..StartOptions::default()
+        };
+        let manager = Manager::new(opts, PathBuf::from("/tmp/never.sock"));
+        let (_tx, rx) = mpsc::channel(1);
+        let (ready_tx, _ready_rx) = oneshot::channel();
+        let err = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(manager.run(rx, ready_tx))
+            .unwrap_err();
+        assert!(matches!(err, Error::Limit(_)), "got {err:?}");
     }
 }

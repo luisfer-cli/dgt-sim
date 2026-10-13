@@ -722,9 +722,11 @@ mod tests {
 
     #[test]
     fn clock_status_bits_follow_the_selected_compatibility_reading() {
-        let mut clock = ClockState::default();
-        clock.to_move = Side::Right;
-        clock.running = true;
+        let mut clock = ClockState {
+            to_move: Side::Right,
+            running: true,
+            ..ClockState::default()
+        };
 
         let header = clock.status_byte(ClockCompat::Header);
         assert_eq!(header & bwtime_status::RIGHT_TO_MOVE, 0x08);

@@ -33,6 +33,21 @@ fn tcp_options(boards: u32) -> StartOptions {
     }
 }
 
+/// Wait until a board leaves IDLE mode, i.e. a mode command written by the
+/// client on the transport has been processed. Client bytes and control-plane
+/// commands travel over different channels, so tests must synchronise on the
+/// observed state rather than on a sleep.
+async fn wait_for_streaming(sim: &RunningSimulator, board: u32) {
+    for _ in 0..200 {
+        let snapshot = sim.snapshot(board).await.unwrap();
+        if snapshot["mode"] != "idle" {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("board {board} never left idle mode");
+}
+
 // ---------------------------------------------------------------- control ---
 
 #[tokio::test]
@@ -54,12 +69,20 @@ async fn control_socket_serves_a_real_manager() {
     // Bridge the socket's requests into the manager, exactly as `start` does.
     let bridge = tokio::spawn(async move {
         while let Some((request, reply)) = jobs_rx.recv().await {
+            let is_shutdown = matches!(request, Request::Shutdown);
             let response = sim
                 .request(request)
                 .await
                 .unwrap_or_else(|err| control::Response::failed(err.to_string()));
             let _ = reply.send(response);
+            if is_shutdown {
+                break;
+            }
         }
+        // Dropping `sim` releases the last sender on the job channel; without
+        // this, a bridge that owns the simulator would wait forever for a close
+        // that never comes.
+        drop(sim);
     });
 
     for _ in 0..200 {
@@ -115,8 +138,8 @@ async fn control_socket_serves_a_real_manager() {
     assert!(text.contains("malformed request"), "{text}");
 
     control::call(&socket, &Request::Shutdown).await.unwrap();
-    // Cancel the server *before* joining the bridge: the server owns the last
-    // sender on the job channel, so waiting for the bridge first deadlocks.
+    // The bridge breaks out on Shutdown and drops its own sender, and the
+    // server stops when notified, so both tasks can be joined.
     shutdown.notify_one();
     let _ = tokio::time::timeout(Duration::from_secs(5), server)
         .await
@@ -148,7 +171,9 @@ async fn control_socket_permissions_are_owner_only() {
     let mode = std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
     shutdown.notify_one();
-    let _ = tokio::time::timeout(Duration::from_secs(5), server).await.expect("server stop");
+    let _ = tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("server stop");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -192,7 +217,7 @@ async fn pty_board_serves_a_serial_client() {
 
     // Update mode works over the pty too.
     client.write_all(&[0x44]).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_for_streaming(&sim, 1).await;
     sim.expect(Request::Move {
         board: 1,
         uci: "e2e4".into(),
@@ -239,6 +264,9 @@ async fn pty_endpoints_are_independent() {
             .unwrap();
         client.write_all(&[0x44]).await.unwrap();
         clients.push(client);
+    }
+    for board in 1..=3 {
+        wait_for_streaming(&sim, board).await;
     }
     sim.expect(Request::Move {
         board: 2,

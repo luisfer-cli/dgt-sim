@@ -207,6 +207,8 @@ fn format_duration(d: Duration) -> String {
 #[derive(Default)]
 struct Outcome {
     messages: Vec<Vec<u8>>,
+    /// The handler wants the current link dropped (see [`BoardCmd::Disconnect`]).
+    drop_link: bool,
     stop: bool,
 }
 
@@ -284,6 +286,14 @@ impl BoardTask {
                     let outcome = self.handle(cmd);
                     if let Err(err) = self.flush(&mut link, outcome.messages).await {
                         tracing::debug!(board = self.id, error = %err, "link write failed");
+                    }
+                    if outcome.drop_link
+                        && let Some(mut old) = link.take()
+                    {
+                        // Drop the live link so the connected client sees EOF,
+                        // exactly as a real board does when it is disconnected.
+                        old.shutdown().await;
+                        tracing::debug!(board = self.id, "link dropped by request");
                     }
                     if outcome.stop {
                         break;
@@ -410,7 +420,13 @@ impl BoardTask {
                 self.connected = false;
                 self.peer = None;
                 self.parser.clear();
-                Outcome::default()
+                // Also drop the live link: refusing future connections is not
+                // enough, the client already attached must see the board go
+                // away.
+                Outcome {
+                    drop_link: true,
+                    ..Outcome::default()
+                }
             }
             BoardCmd::Reconnect => {
                 self.enabled = true;
@@ -427,6 +443,7 @@ impl BoardTask {
             }
             BoardCmd::Shutdown => Outcome {
                 messages: Vec::new(),
+                drop_link: false,
                 stop: true,
             },
         }

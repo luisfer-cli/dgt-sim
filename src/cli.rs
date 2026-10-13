@@ -83,6 +83,7 @@ pub enum Command {
     /// List every virtual board with its endpoint.
     List(OutputArgs),
     /// Show one board's full state.
+    #[command(visible_alias = "status")]
     Show(ShowArgs),
     /// Show recently emitted protocol messages as hex.
     Messages {
@@ -705,11 +706,10 @@ fn render(request: &Request, data: &Value) -> Result<()> {
         | Request::Lift { .. }
         | Request::Place { .. }
         | Request::Clear { .. } => {
-            emit_summary(data);
+            emit_summary(data, true);
         }
-        Request::SetFen { .. } | Request::Reset { .. } | Request::SetMode { .. } => {
-            emit_summary(data)
-        }
+        Request::SetFen { .. } | Request::Reset { .. } => emit_summary(data, true),
+        Request::SetMode { .. } => emit_summary(data, false),
         Request::Replay { .. } => {
             if data["started"] == Value::Bool(true) {
                 println!("replay started");
@@ -717,17 +717,21 @@ fn render(request: &Request, data: &Value) -> Result<()> {
         }
         Request::Stop { .. } => println!("board {} stopped", stringify_field(data, "stopped")),
         Request::Shutdown => println!("shutting down"),
-        Request::Disconnect { .. } | Request::Reconnect { .. } => emit_summary(data),
-        Request::Fault { .. } => emit_summary(data),
-        Request::Config { .. } => emit_summary(data),
-        Request::Clock { .. } => emit_summary(data),
+        Request::Disconnect { .. } | Request::Reconnect { .. } => emit_summary(data, false),
+        Request::Fault { .. } => emit_summary(data, false),
+        Request::Config { .. } => emit_summary(data, false),
+        Request::Clock { .. } => emit_summary(data, false),
     }
     Ok(())
 }
 
 /// Compact one-line report for mutations, including how many protocol
 /// messages the change produced.
-fn emit_summary(data: &Value) {
+///
+/// `hint` adds an explanation when nothing was streamed; it is set only for the
+/// commands where streaming was actually expected, so that mode changes and
+/// configuration commands do not print a misleading warning.
+fn emit_summary(data: &Value, hint: bool) {
     let emitted = data["last_emitted"].as_u64().unwrap_or(0);
     println!(
         "board {} ({}) mode={} emitted={} fen={}",
@@ -737,7 +741,7 @@ fn emit_summary(data: &Value) {
         emitted,
         stringify_field(data, "fen")
     );
-    if emitted == 0 {
+    if hint && emitted == 0 {
         eprintln!(
             "dgt-sim: no protocol messages were streamed (the board is not in an update mode, \
              or no client is attached); use `dgt-sim set-mode --mode update-board` or connect a client"
