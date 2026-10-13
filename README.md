@@ -100,6 +100,12 @@ Run `dgt-sim --help` or `dgt-sim <command> --help` for the full list of flags.
 - [`docs/compatibility.md`](docs/compatibility.md) — what "compatible" means here, and what it does not.
 - [`docs/examples.md`](docs/examples.md) — copy-pasteable recipes.
 
+## Companion tools
+
+- [`gui-dgt-sim`](https://github.com/luisfer-cli/gui-dgt-sim) — a native desktop
+  GUI built on the control plane: one draggable chessboard per board, created on
+  demand through the `create` request (`dgt-sim add`).
+
 ## Run as a service
 
 A systemd user unit is provided in [`packaging/systemd/`](packaging/systemd/);
